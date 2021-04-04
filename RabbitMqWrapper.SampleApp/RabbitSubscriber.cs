@@ -19,13 +19,15 @@ namespace RabbitMqWrapper.SampleApp
         public string Password { get; init; }
     }
 
-    public class RabbitWrapperConfiguration
+    public class RabbitSubscriberConfiguration
     {
-        public string exchangeName { get; init; }
-        public string queueName { get; init; }
-        public string consumerTag { get; init; }
-        public int? maxRetry { get; init; }
-        public int? backoffRateInSeconds { get; init; }
+        public string ExchangeName { get; init; }
+        public string QueueName { get; init; }
+        public string ConsumerTag { get; init; }
+        public string ExchangeType { get; init; }
+        public string RoutingKey { get; init; }
+        public uint? MaxRetry { get; init; }
+        public uint? BackoffRateInSeconds { get; init; }
     }
 
     public class DlxMessage<T> where T : class
@@ -37,60 +39,60 @@ namespace RabbitMqWrapper.SampleApp
     public interface IRabbitSubscriber
     {
         Task StartProcess<T>(
+            RabbitSubscriberConfiguration option,
             Func<T, BasicDeliverEventArgs, Task> queueProcessor,
             Func<DlxMessage<T>, BasicDeliverEventArgs, Task> dlxProcessor) where T : class;
     }
+
     public class RabbitSubscriber : IRabbitSubscriber, IDisposable
     {
         private readonly IConnectionFactory rabbitConnFactory;
         private readonly ILogger<RabbitSubscriber> logger;
-        private readonly string exchangeName;
-        private readonly string dlxName;
-        private readonly string retryExchangeName;
-        private readonly string queueName;
-        private readonly string dlqName;
-        private readonly string retryQueueName;
-        private readonly int? maxRetry;
-        private readonly int? backoffRateInSeconds;
-        private readonly string consumerTag;
-        private bool disposed = false;
-        private IModel channel;
-        private IConnection connection;
+        private readonly string retryExchangeSuffix = ".retryx";
+        private readonly string retryQueueSuffix = ".retryq";
+        private readonly string dlxSuffix = ".dlx";
+        private readonly string dlqSuffix = ".dlq";
 
-        public RabbitSubscriber(IConnectionFactory rabbitConnFactory, IOptions<RabbitWrapperConfiguration> option, ILogger<RabbitSubscriber> logger)
+        private bool disposed = false;
+        private IConnection connection;
+        private List<IModel> channelsToDispose;
+
+        public RabbitSubscriber(IConnectionFactory rabbitConnFactory, ILogger<RabbitSubscriber> logger)
         {
             this.rabbitConnFactory = rabbitConnFactory;
             this.logger = logger;
-            this.queueName = option.Value.queueName;
-            this.exchangeName = option.Value.exchangeName;
-            this.consumerTag = option.Value.consumerTag;
-            this.maxRetry = option.Value.maxRetry;
-            this.backoffRateInSeconds = option.Value.backoffRateInSeconds;
-            dlxName = $"{exchangeName}.dlx";
-            dlqName = $"{exchangeName}.dlq";
-            retryExchangeName = $"{exchangeName}.retry";
-            retryQueueName = $"{exchangeName}.retry.queue";
-
-            if (this.maxRetry.HasValue && !backoffRateInSeconds.HasValue)
-            {
-                throw new ArgumentException("Retry count should be accompanied by back off rate");
-            }
+            channelsToDispose = new List<IModel>();
         }
 
         public Task StartProcess<T>(
+            RabbitSubscriberConfiguration option,
             Func<T, BasicDeliverEventArgs, Task> queueProcessor,
             Func<DlxMessage<T>, BasicDeliverEventArgs, Task> dlxProcessor) where T : class
         {
+            var (queueName, exchangeName, consumerTag, maxRetry, backoffRateInSeconds, exchangeType, routingKey) =
+                (option.QueueName, option.ExchangeName, option.ConsumerTag, option.MaxRetry, option.BackoffRateInSeconds, option.ExchangeType, option.RoutingKey);
+
+            if (maxRetry.HasValue && !backoffRateInSeconds.HasValue)
+            {
+                throw new ArgumentException("Retry count should be accompanied by back off rate");
+            }
+
+            if (exchangeType.ToLower() != "fanout" && string.IsNullOrWhiteSpace(routingKey))
+            {
+                throw new ArgumentException("non-fanout exchange type must have routing key");
+            }
+
             connection = rabbitConnFactory.CreateConnection();
-            channel = connection.CreateModel();
+            var channel = connection.CreateModel();
+            channelsToDispose.Add(channel);
 
-            CreateDlx(dlxProcessor);
+            CreateDlx(dlxProcessor, channel, exchangeName, queueName, consumerTag);
 
-            channel.ExchangeDeclare(exchange: exchangeName, type: ExchangeType.Fanout);
+            channel.ExchangeDeclare(exchange: exchangeName, type: exchangeType.ToLower());
 
             var qName = channel.QueueDeclare(queueName, true, false, false, null).QueueName;
 
-            channel.QueueBind(qName, exchangeName, "", null);
+            channel.QueueBind(qName, exchangeName, routingKey ?? "", null);
 
             var consumer = new AsyncEventingBasicConsumer(channel);
             consumer.Received += async (model, ea) =>
@@ -132,19 +134,17 @@ namespace RabbitMqWrapper.SampleApp
                         if (!maxRetry.HasValue || maxRetry <= 0)
                         {
                             // No retry, just dead letter directly
-                            channel.BasicPublish(dlxName, "", basicProperties: ea.BasicProperties, body: ea.Body.ToArray());
-                            channel.BasicAck(ea.DeliveryTag, false);
+                            SendToDlx(channel, exchangeName, ea);
                             return;
                         }
 
-
                         // try convert routingkeys backoff and convert to retry count below
-                        if (routingKeysInMillis != null && Int32.TryParse(Encoding.UTF8.GetString((routingKeysInMillis as List<object>)[0] as byte[]), out int retryCount))
+                        if (routingKeysInMillis != null && UInt32.TryParse(Encoding.UTF8.GetString((routingKeysInMillis as List<object>)[0] as byte[]), out uint retryCount))
                         {
                             retryCount = (retryCount / (backoffRateInSeconds.Value * 1000)) + 1; // when it's in here, means it has gone through first round
                             if (retryCount <= maxRetry)
                             {
-                                SendToRetryExchange(retryCount, ea);
+                                SendToRetryExchange(channel, retryCount, backoffRateInSeconds.Value, exchangeName, queueName, routingKey, ea);
                                 return;
                             }
 
@@ -157,13 +157,12 @@ namespace RabbitMqWrapper.SampleApp
                             {
                                 PropertyNamingPolicy = JsonNamingPolicy.CamelCase
                             });
-                            channel.BasicPublish(dlxName, "", basicProperties: ea.BasicProperties, body: Encoding.UTF8.GetBytes(payloadString));
-                            channel.BasicAck(ea.DeliveryTag, false);
+                            SendToDlx(channel, exchangeName, ea, Encoding.UTF8.GetBytes(payloadString));
 
                             return;
                         }
 
-                        SendToRetryExchange(1, ea);
+                        SendToRetryExchange(channel, 1, backoffRateInSeconds.Value, exchangeName, queueName, routingKey, ea);
                     }
                     catch (Exception ex)
                     {
@@ -181,28 +180,45 @@ namespace RabbitMqWrapper.SampleApp
             return Task.CompletedTask;
         }
 
-        private void SendToRetryExchange(int currentRetryCount, BasicDeliverEventArgs ea)
+        private void SendToDlx(IModel channel, string exchangeName, BasicDeliverEventArgs ea, byte[] body = null)
         {
-            var delayInMilliseconds = (currentRetryCount * backoffRateInSeconds.Value * 1000);
-            CreateRetryQueue(delayInMilliseconds);
+            var dlxName = $"{exchangeName}{dlxSuffix}";
+            channel.BasicPublish(dlxName, "", basicProperties: ea.BasicProperties, body: body ?? ea.Body.ToArray());
+            channel.BasicAck(ea.DeliveryTag, false);
+        }
+
+        private void SendToRetryExchange(IModel channel, uint currentRetryCount, uint backoffRateInSeconds, string exchangeName, string queueName, string originalQueueRoutingKey, BasicDeliverEventArgs ea)
+        {
+            var retryExchangeName = $"{exchangeName}{retryExchangeSuffix}";
+            var delayInMilliseconds = (currentRetryCount * backoffRateInSeconds * 1000);
+            CreateRetryQueue(channel, delayInMilliseconds, exchangeName, queueName, originalQueueRoutingKey);
             channel.BasicPublish(retryExchangeName, delayInMilliseconds.ToString(), basicProperties: ea.BasicProperties, body: ea.Body.ToArray());
             channel.BasicAck(ea.DeliveryTag, false);
         }
 
-        private void CreateRetryQueue(int delayInMilliseconds)
+        private void CreateRetryQueue(IModel channel, uint delayInMilliseconds, string exchangeName, string queueName, string originalQueueRoutingKey)
         {
+            var retryExchangeName = $"{exchangeName}{retryExchangeSuffix}";
+            var retryQueueName = $"{queueName}{retryQueueSuffix}";
             channel.ExchangeDeclare(exchange: retryExchangeName, type: ExchangeType.Direct);
             var args = new Dictionary<string, object>()
                                 {
                                     {"x-dead-letter-exchange", exchangeName},
                                     {"x-message-ttl", delayInMilliseconds}
                                 };
-            var retryQName = channel.QueueDeclare($"{ retryQueueName}.{ delayInMilliseconds}", true, false, true, args).QueueName;
+            if (!string.IsNullOrWhiteSpace(originalQueueRoutingKey))
+            {
+                args.Add("x-dead-letter-routing-key", originalQueueRoutingKey);
+            }
+
+            var retryQName = channel.QueueDeclare($"{retryQueueName}.{delayInMilliseconds}", false, true, true, args).QueueName;
             channel.QueueBind(retryQName, retryExchangeName, delayInMilliseconds.ToString(), null);
         }
 
-        private void CreateDlx<T>(Func<DlxMessage<T>, BasicDeliverEventArgs, Task> dlxProcessor) where T : class
+        private void CreateDlx<T>(Func<DlxMessage<T>, BasicDeliverEventArgs, Task> dlxProcessor, IModel channel, string exchangeName, string queueName, string consumerTag) where T : class
         {
+            var dlxName = $"{exchangeName}{dlxSuffix}";
+            var dlqName = $"{queueName}{dlqSuffix}";
             channel.ExchangeDeclare(exchange: dlxName, type: ExchangeType.Fanout);
 
             var dlxqName = channel.QueueDeclare(dlqName, true, false, false, null).QueueName;
@@ -235,7 +251,7 @@ namespace RabbitMqWrapper.SampleApp
                 channel.BasicConsume(
                     queue: dlxqName,
                     autoAck: false,
-                    consumerTag: $"{consumerTag ?? Assembly.GetExecutingAssembly().ToString()} - dlx",
+                    consumerTag: $"{consumerTag ?? Assembly.GetExecutingAssembly().ToString()} - dlq",
                     consumer: consumer);
             }
         }
@@ -246,7 +262,7 @@ namespace RabbitMqWrapper.SampleApp
             {
                 if (disposing)
                 {
-                    channel?.Dispose();
+                    channelsToDispose.ForEach(channel => channel?.Dispose());
                     connection?.Dispose();
                 }
 

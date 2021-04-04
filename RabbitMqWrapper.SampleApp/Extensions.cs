@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -10,10 +11,10 @@ namespace RabbitMqWrapper.SampleApp
         public static void UseRabbitWrapper(this IServiceCollection services, IConfiguration configuration)
         {
             services
-                .Configure<RabbitMqConnection>(options => configuration.GetSection("RabbitWrapper:Connection").Bind(options));
+                .Configure<RabbitMqConnection>(options => configuration.GetSection("RabbitMqWrapper:Connection").Bind(options));
 
             services
-                .Configure<RabbitWrapperConfiguration>(options => configuration.GetSection("RabbitWrapper:configuration").Bind(options));
+                .Configure<List<RabbitSubscriberConfiguration>>(options => configuration.GetSection("RabbitMqWrapper:Configurations").Bind(options));
 
             services.AddSingleton<IConnectionFactory, ConnectionFactory>(c =>
             {
