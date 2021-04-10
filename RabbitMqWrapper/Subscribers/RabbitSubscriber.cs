@@ -6,44 +6,12 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using RabbitMqWrapper.Models;
 
-namespace RabbitMqWrapper.SampleApp
+namespace RabbitMqWrapper.Subscribers
 {
-    public class RabbitMqConnection
-    {
-        public string Hostname { get; init; }
-        public string Username { get; init; }
-        public string Password { get; init; }
-    }
-
-    public class RabbitSubscriberConfiguration
-    {
-        public string ExchangeName { get; init; }
-        public string QueueName { get; init; }
-        public string ConsumerTag { get; init; }
-        public string ExchangeType { get; init; }
-        public string RoutingKey { get; init; }
-        public uint? MaxRetry { get; init; }
-        public uint? BackoffRateInSeconds { get; init; }
-    }
-
-    public class DlxMessage<T> where T : class
-    {
-        public string Error { get; set; }
-        public T Message { get; init; }
-    }
-
-    public interface IRabbitSubscriber
-    {
-        Task StartProcess<T>(
-            RabbitSubscriberConfiguration option,
-            Func<T, BasicDeliverEventArgs, Task> queueProcessor,
-            Func<DlxMessage<T>, BasicDeliverEventArgs, Task> dlxProcessor) where T : class;
-    }
-
     public class RabbitSubscriber : IRabbitSubscriber, IDisposable
     {
         private readonly IConnectionFactory rabbitConnFactory;

@@ -5,8 +5,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="5.0.1" NoWarn="NU1605" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="5.0.1" NoWarn="NU1605" />
     <PackageReference Include="Microsoft.AspNetCore.Diagnostics.HealthChecks" Version="2.2.0" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="5.0.0" />
     <PackageReference Include="NLog" Version="4.7.9" />
@@ -20,5 +18,10 @@
     <None Update="nlog.config">
       <CopyToOutputDirectory>Preserve Newest</CopyToOutputDirectory>
     </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RabbitMqWrapper.Extensions\RabbitMqWrapper.Extensions.csproj" />
+    <ProjectReference Include="..\RabbitMqWrapper\RabbitMqWrapper.csproj" />
   </ItemGroup>
 </Project>

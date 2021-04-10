@@ -6,6 +6,8 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using RabbitMqWrapper.Models;
+using RabbitMqWrapper.Subscribers;
 
 namespace RabbitMqWrapper.SampleApp
 {
@@ -13,7 +15,7 @@ namespace RabbitMqWrapper.SampleApp
     {
         public string Message { get; init; }
     }
-    
+
     public class Processor : BackgroundService
     {
         private readonly IRabbitSubscriber rabbitWrapper;
@@ -30,7 +32,7 @@ namespace RabbitMqWrapper.SampleApp
         protected override Task ExecuteAsync(CancellationToken stoppingToken)
         {
             rabbitWrapper.StartProcess<SampleMessage>(
-            options.Single(x=>x.QueueName == "hello.queue"),
+            options.Single(x => x.QueueName == "hello.queue"),
             (o, ea) =>
             {
                 if (o.Message == "no h")
@@ -44,16 +46,16 @@ namespace RabbitMqWrapper.SampleApp
             },
             (m, ea) =>
             {
-               logger.LogInformation("Processing dlx with message: {0}; error: {1}", m.Message.Message, m.Error);
+                logger.LogInformation("Processing dlx with message: {0}; error: {1}", m.Message.Message, m.Error);
 
                 return Task.CompletedTask;
             });
 
             rabbitWrapper.StartProcess<SampleMessage>(
-            options.Single(x=>x.QueueName == "directHello.queue"),
+            options.Single(x => x.QueueName == "directHello.queue"),
             (o, ea) =>
             {
-                
+
                 if (o.Message == "no h")
                 {
                     throw new Exception("error");
@@ -65,7 +67,7 @@ namespace RabbitMqWrapper.SampleApp
             },
             (m, ea) =>
             {
-               logger.LogInformation("Processing Direct dlx with message: {0}; error: {1}", m.Message.Message, m.Error);
+                logger.LogInformation("Processing Direct dlx with message: {0}; error: {1}", m.Message.Message, m.Error);
 
                 return Task.CompletedTask;
             });

@@ -3,8 +3,10 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
+using RabbitMqWrapper.Models;
+using RabbitMqWrapper.Subscribers;
 
-namespace RabbitMqWrapper.SampleApp
+namespace RabbitMqWrapper.Extensions
 {
     public static class Extensions
     {
