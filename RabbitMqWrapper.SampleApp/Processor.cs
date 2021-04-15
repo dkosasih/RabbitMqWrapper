@@ -33,7 +33,7 @@ namespace RabbitMqWrapper.SampleApp
         {
             rabbitWrapper.StartProcess<SampleMessage>(
             options.Single(x => x.QueueName == "hello.queue"),
-            (o, ea) =>
+            (o) =>
             {
                 if (o.Message == "no h")
                 {
@@ -44,7 +44,7 @@ namespace RabbitMqWrapper.SampleApp
 
                 return Task.CompletedTask;
             },
-            (m, ea) =>
+            (m) =>
             {
                 logger.LogInformation("Processing dlx with message: {0}; error: {1}", m.Message.Message, m.Error);
 

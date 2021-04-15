@@ -34,8 +34,8 @@ namespace RabbitMqWrapper.Subscribers
 
         public Task StartProcess<T>(
             RabbitSubscriberConfiguration option,
-            Func<T, BasicDeliverEventArgs, Task> queueProcessor,
-            Func<DlxMessage<T>, BasicDeliverEventArgs, Task> dlxProcessor) where T : class
+            Func<T, Task> queueProcessor,
+            Func<DlxMessage<T>, Task> dlxProcessor) where T : class
         {
             var (queueName, exchangeName, consumerTag, maxRetry, backoffRateInSeconds, exchangeType, routingKey) =
                 (option.QueueName, option.ExchangeName, option.ConsumerTag, option.MaxRetry, option.BackoffRateInSeconds, option.ExchangeType, option.RoutingKey);
@@ -89,20 +89,20 @@ namespace RabbitMqWrapper.Subscribers
                         return;
                     }
 
-                    await queueProcessor(deserializedObject, ea);
+                    await queueProcessor(deserializedObject);
                     channel.BasicAck(ea.DeliveryTag, false);
                 }
                 catch (Exception e)
                 {
                     // Get routing keys from (first (latest)) headers to determine the current retry backoff
-                    var routingKeysInMillis = ea.BasicProperties.Headers != null ? ((ea.BasicProperties.Headers["x-death"] as List<object>).FirstOrDefault() as Dictionary<string, object>)?["routing-keys"] : null;
+                    var routingKeysInMillis = ea.BasicProperties?.Headers != null ? ((ea.BasicProperties.Headers["x-death"] as List<object>).FirstOrDefault() as Dictionary<string, object>)?["routing-keys"] : null;
 
                     try
                     {
                         if (!maxRetry.HasValue || maxRetry <= 0)
                         {
                             // No retry, just dead letter directly
-                            SendToDlx(channel, exchangeName, ea);
+                            SendToDlx(channel, exchangeName, deserializedObject, e, ea);
                             return;
                         }
 
@@ -116,16 +116,7 @@ namespace RabbitMqWrapper.Subscribers
                                 return;
                             }
 
-                            var dlxMessage = new DlxMessage<T>
-                            {
-                                Error = e.Message,
-                                Message = deserializedObject
-                            };
-                            var payloadString = JsonSerializer.Serialize(dlxMessage, new JsonSerializerOptions
-                            {
-                                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-                            });
-                            SendToDlx(channel, exchangeName, ea, Encoding.UTF8.GetBytes(payloadString));
+                            SendToDlx(channel, exchangeName, deserializedObject, e, ea);
 
                             return;
                         }
@@ -148,10 +139,21 @@ namespace RabbitMqWrapper.Subscribers
             return Task.CompletedTask;
         }
 
-        private void SendToDlx(IModel channel, string exchangeName, BasicDeliverEventArgs ea, byte[] body = null)
+        private void SendToDlx<T>(IModel channel, string exchangeName, T payload, Exception exception, BasicDeliverEventArgs ea) where T : class
         {
             var dlxName = $"{exchangeName}{dlxSuffix}";
-            channel.BasicPublish(dlxName, "", basicProperties: ea.BasicProperties, body: body ?? ea.Body.ToArray());
+
+            var dlxMessage = new DlxMessage<T>
+            {
+                Error = exception.Message,
+                Message = payload
+            };
+            var payloadString = JsonSerializer.Serialize(dlxMessage, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            });
+
+            channel.BasicPublish(dlxName, "", basicProperties: ea.BasicProperties, body: Encoding.UTF8.GetBytes(payloadString));
             channel.BasicAck(ea.DeliveryTag, false);
         }
 
@@ -183,7 +185,7 @@ namespace RabbitMqWrapper.Subscribers
             channel.QueueBind(retryQName, retryExchangeName, delayInMilliseconds.ToString(), null);
         }
 
-        private void CreateDlx<T>(Func<DlxMessage<T>, BasicDeliverEventArgs, Task> dlxProcessor, IModel channel, string exchangeName, string queueName, string consumerTag) where T : class
+        private void CreateDlx<T>(Func<DlxMessage<T>, Task> dlxProcessor, IModel channel, string exchangeName, string queueName, string consumerTag) where T : class
         {
             var dlxName = $"{exchangeName}{dlxSuffix}";
             var dlqName = $"{queueName}{dlqSuffix}";
@@ -207,7 +209,7 @@ namespace RabbitMqWrapper.Subscribers
                             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
                         });
 
-                        await dlxProcessor(deserializedObject, ea);
+                        await dlxProcessor(deserializedObject);
                         channel.BasicAck(ea.DeliveryTag, false);
                     }
                     catch (Exception ex)
